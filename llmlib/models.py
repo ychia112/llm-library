@@ -4,11 +4,13 @@ from pydantic import BaseModel, Field
 import uuid
 
 class Message(BaseModel):
+    """Represents a single message within an LLM session."""
     role: str  # "user" | "assistant" | "system"
     content: str
     timestamp: Optional[datetime] = None
 
 class Session(BaseModel):
+    """Represents a complete LLM chat session with its metadata and messages."""
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     source_id: str  # Original ID from platform
     platform: str  # "chatgpt" | "claude" | "gemini"

@@ -7,8 +7,9 @@ from llmlib.parsers.base import BaseParser
 
 
 class ChatGPTParser(BaseParser):
+    """Parser for ChatGPT conversations export files."""
     def parse(self, file_path: Path) -> List[Session]:
-        """Parse ChatGPT conversations.json."""
+        """Parses ChatGPT conversations.json or multi-file exports."""
         with open(file_path, "r", encoding="utf-8") as f:
             data = json.load(f)
 
