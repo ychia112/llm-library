@@ -1,0 +1,51 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual environments
+.venv/
+venv/
+env/
+.env
+
+# Environment variables / secrets
+.env
+.env.*
+*.env
+secrets.json
+
+# Database files (local library data — never commit)
+*.db
+*.sqlite
+*.sqlite3
+~/.llmlib/
+
+# LLM export files (may contain private conversations)
+conversations.json
+conversations-*.json
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Build
+*.pyo
+*.pyd
