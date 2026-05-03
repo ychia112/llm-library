@@ -14,11 +14,10 @@ build/
 venv/
 env/
 .env
-
-# Environment variables / secrets
-.env
 .env.*
 *.env
+
+# Environment variables / secrets
 secrets.json
 
 # Database files (local library data — never commit)
@@ -30,6 +29,7 @@ secrets.json
 # LLM export files (may contain private conversations)
 conversations.json
 conversations-*.json
+conversations*.json
 
 # OS
 .DS_Store
@@ -41,7 +41,7 @@ Thumbs.db
 *.swp
 *.swo
 
-# Testing
+# Testing / coverage
 .pytest_cache/
 .coverage
 htmlcov/
