@@ -1,111 +1,155 @@
 # llm-library
 
-Personal LLM Knowledge Base CLI for turning ChatGPT/Claude exports into a local, searchable knowledge library.
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Python](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org)
+[![SQLite](https://img.shields.io/badge/storage-sqlite--vec-green)](https://github.com/asg017/sqlite-vec)
 
-## What this project does today
+> Turn your scattered ChatGPT and Claude chat history into a local, searchable, auto-tagged knowledge library.
 
-- Ingests chat exports from:
-  - ChatGPT (`mapping` tree traversal, first-child path)
-  - Claude (`chat_messages` / `messages` flat parsing)
-- Generates metadata with Gemini:
-  - `topic`, `tags`, `question_type`, `summary`
-- Generates embeddings with Gemini and stores everything locally in SQLite + `sqlite-vec`
-- Supports CLI workflows:
-  - `ingest` (parse -> tag -> embed -> store)
-  - `ask` (embed query -> vector search top-5)
-  - `list` (filter by tag/platform/type)
-  - `show` (full session + message transcript)
+**CLI-first · Local-first · Privacy-first** — zero cloud dependency, one `.db` file.
 
-## Architecture (current)
+---
 
-| Layer | File(s) | Responsibility |
-| --- | --- | --- |
-| CLI | `llmlib/cli.py` | User-facing commands and flow orchestration |
-| Parsers | `llmlib/parsers/*.py` | Normalize platform exports into `Session` |
-| Models | `llmlib/models.py` | Pydantic models for `Session` and `Message` |
-| LLM | `llmlib/llm/gemini.py` | Tagging and embedding via Gemini API |
-| Storage | `llmlib/storage/db.py` | Local DB schema, upsert/search/list/get/delete |
-| Tests | `tests/*.py` | Parser, storage, and Gemini-tagger behavior |
+## Problem
 
-## Quick start
+Every LLM session you've ever had is siloed. You've solved the same bug twice, asked for the same explanation three times, and can't find that FastAPI middleware solution from last month. **llmlib fixes this.**
 
-### 1. Prerequisites
+## How it works
 
-- Python 3.10+
-- A Gemini API key
-
-### 2. Install
-
-```bash
-pip install -e .
-pip install pytest
+```
+Export → Parse → Tag → Embed → Query
 ```
 
-### 3. Configure environment
+1. Export your chat history from ChatGPT or Claude
+2. Run `llmlib ingest` — sessions are parsed, auto-tagged, and embedded locally
+3. Run `llmlib ask "your question"` — vector search finds relevant past sessions instantly
+
+---
+
+## Features
+
+- **Multi-platform parsing** — ChatGPT (tree traversal) and Claude (flat list)
+- **Auto-tagging** — Gemini 2.0 Flash generates `topic`, `tags`, `question_type`, and `summary` per session
+- **Vector search** — embeddings stored in `sqlite-vec`, cosine similarity search with `llmlib ask`
+- **Fully local storage** — single `~/.llmlib/library.db` file, no server needed
+- **Flexible filtering** — `llmlib list` by tag, platform, or question type
+
+---
+
+## Architecture
+
+| Layer | File | Responsibility |
+|-------|------|----------------|
+| CLI | `llmlib/cli.py` | User-facing commands and flow orchestration |
+| Parsers | `llmlib/parsers/` | Normalize platform exports into `Session` objects |
+| Models | `llmlib/models.py` | Pydantic models: `Session`, `Message` |
+| LLM | `llmlib/llm/gemini.py` | Tagging and embedding via Gemini API |
+| Storage | `llmlib/storage/db.py` | SQLite + sqlite-vec: upsert, search, list, get, delete |
+| Tests | `tests/` | Parser, storage, and tagger unit tests |
+
+---
+
+## Quick Start
+
+### Prerequisites
+
+- Python 3.10+
+- A [Gemini API key](https://aistudio.google.com) (free tier: 1,000 req/day)
+
+### Install
+
+```bash
+git clone https://github.com/ychia112/llm-library.git
+cd llm-library
+pip install -e .
+```
+
+### Configure
 
 ```bash
 export GEMINI_API_KEY="your_key_here"
 ```
 
-`ingest` and `ask` require this variable.
+Add to `~/.zshrc` or `~/.bash_profile` to persist across sessions.
 
-### 4. Run CLI
+### Usage
 
 ```bash
-llmlib ingest chatgpt /path/to/conversations.json
-llmlib ingest claude /path/to/conversations.json
-llmlib ask "fastapi middleware auth"
+# Ingest a ChatGPT export
+llmlib ingest chatgpt ~/Downloads/conversations.json
+
+# Ingest a Claude export
+llmlib ingest claude ~/Downloads/conversations.json
+
+# Search your library
+llmlib ask "fastapi middleware authentication"
+
+# List all sessions
 llmlib list
-llmlib list --platform chatgpt --tag python --type howto
+
+# Filter by platform, tag, and type
+llmlib list --platform chatgpt --tag python --type debug
+
+# Show full session with messages
 llmlib show <session-id>
 ```
 
-## Local data and privacy
+---
 
-- Main DB path: `~/.llmlib/library.db`
-- Data is stored locally in:
-  - `sessions` (metadata + messages)
-  - `session_vectors` (embeddings via `sqlite-vec`)
-- The only external call is Gemini API usage for tag/embedding operations.
+## Data & Privacy
 
-## Open-source hygiene policy
+- All data is stored locally at `~/.llmlib/library.db`
+- The **only** external API call is to Gemini (for tagging and embedding during `ingest` and `ask`)
+- Never commit your `.db` file or export files to version control (see `.gitignore`)
 
-To keep this public repository clean and contributor-friendly:
+---
 
-1. **No secrets or private exports in git**
-   - Never commit API keys, tokens, or real chat export files.
-   - Keep real data local only.
-2. **Tests are public-safe**
-   - Use synthetic fixtures/mocks in `tests/`.
-   - Do not include personal/company conversation content.
-3. **Reproducible setup**
-   - Setup and command examples are documented in this README.
-4. **Quality gate before merge**
-   - Run:
-     ```bash
-     python -m pytest -q
-     ```
-   - PRs should only merge when tests pass.
-5. **Contributor clarity**
-   - Keep command behavior, required env vars, and data expectations explicit in docs.
-6. **Versioning and change visibility**
-   - Use tagged releases and maintain a changelog as the project evolves.
-7. **Docs-first for public APIs**
-   - Any CLI behavior changes should update README examples and command docs.
+## Development
 
-## Testing
+```bash
+# Install with dev dependencies
+pip install -e .
+pip install pytest
+
+# Run tests
+python -m pytest -q
+```
+
+Tests cover:
+- ChatGPT parser tree traversal and role filtering
+- Claude parser flat-list normalization
+- `LibraryDB` upsert / search / list / delete
+- Gemini tagger JSON output and embedding calls (mocked)
+
+---
+
+## Roadmap
+
+- [x] ChatGPT parser (multi-file format, tree traversal)
+- [x] Claude parser
+- [x] Auto-tagger via Gemini API
+- [x] sqlite-vec storage + cosine search
+- [x] CLI: `ingest` / `ask` / `list` / `show`
+- [ ] Similarity threshold for cache-hit behavior in `ask`
+- [ ] Gemini / Perplexity export support
+- [ ] Chrome extension for auto-sync
+- [ ] MCP server interface (query your library from Gemini CLI / Copilot)
+- [ ] VS Code extension sidebar
+
+---
+
+## Contributing
+
+Pull requests are welcome. For major changes, please open an issue first to discuss what you'd like to change.
+
+Please make sure tests pass before submitting a PR:
 
 ```bash
 python -m pytest -q
 ```
 
-Current tests cover:
-- ChatGPT parser traversal + role filtering
-- Claude parser normalization
-- LibraryDB upsert/search/list/delete
-- Gemini tagger JSON parsing + embedding calls (mocked)
+---
 
-## Known limitations (current implementation)
+## License
 
-- `ask` currently prints top-5 matches but does not yet implement a similarity-threshold decision layer (for direct cache-hit behavior).
-- Local embedding fallback providers are not wired yet; current embedding/tagging flow is Gemini-based.
+[MIT](LICENSE)
