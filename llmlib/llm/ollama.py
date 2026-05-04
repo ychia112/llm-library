@@ -1,17 +1,17 @@
-from google import genai
-from google.genai import types
+from openai import OpenAI, APIConnectionError
 from typing import List, Optional, Dict, Any
 import json
 from llmlib.models import Session
 
-class GeminiTagger:
-    """Handles session metadata generation and embedding using Gemini API."""
+class OllamaTagger:
+    """Handles session metadata generation and embedding using Ollama's OpenAI-compatible API."""
     
-    def __init__(self, api_key: str, model="gemini-2.0-flash-lite"):
-        """Initializes the Gemini client with the provided API key."""
-        self.client = genai.Client(api_key=api_key)
-        self.tagger_model = model
-        self.embedding_model = "text-embedding-004"
+    def __init__(self, model="gemma4:26b", embed_model="nomic-embed-text",
+                 base_url="http://localhost:11434/v1"):
+        """Initializes the Ollama client using OpenAI SDK."""
+        self.client = OpenAI(base_url=base_url, api_key="ollama")
+        self.model = model
+        self.embed_model = embed_model
 
     def _build_context(self, session: Session) -> str:
         """Constructs a condensed context from session messages."""
@@ -25,8 +25,8 @@ class GeminiTagger:
 
     def tag_session(self, session: Session) -> Dict[str, Any]:
         """
-        Uses Gemini 2.0 Flash Lite to generate metadata.
-        Output: Dictionary containing 'topic', 'tags', 'question_type', and 'summary'.
+        Generates metadata using Ollama.
+        Output: strict JSON (topic, tags, question_type, summary).
         """
         context = self._build_context(session)
         prompt = f"""
@@ -47,16 +47,15 @@ Expected JSON schema:
 
 Constraint: question_type MUST be exactly one of [debug, design, research, howto].
 """
-
         try:
-            response = self.client.models.generate_content(
-                model=self.tagger_model,
-                contents=prompt,
-                config=types.GenerateContentConfig(
-                    response_mime_type="application/json",
-                ),
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=[{"role": "user", "content": prompt}],
+                response_format={"type": "json_object"}
             )
-            return json.loads(response.text)
+            return json.loads(response.choices[0].message.content)
+        except APIConnectionError:
+            raise ConnectionError("Failed to connect to Ollama. Please ensure 'ollama serve' is running.")
         except (json.JSONDecodeError, Exception):
             return {
                 "topic": "Unknown",
@@ -66,21 +65,20 @@ Constraint: question_type MUST be exactly one of [debug, design, research, howto
             }
 
     def embed_session(self, session: Session) -> List[float]:
-        """Generates an embedding for a session using its title and summary."""
-        text_to_embed = f"Title: {session.title}\nSummary: {session.summary or ''}"
-        
-        response = self.client.models.embed_content(
-            model=self.embedding_model,
-            contents=text_to_embed,
-            config=types.EmbedContentConfig(task_type="RETRIEVAL_DOCUMENT")
-        )
-        return response.embeddings[0].values
+        """Generates an embedding using nomic-embed-text via Ollama."""
+        text = f"Title: {session.title}\nSummary: {session.summary or ''}"
+        return self._get_embedding(text)
 
     def embed_query(self, query: str) -> List[float]:
-        """Generates an embedding for a search query."""
-        response = self.client.models.embed_content(
-            model=self.embedding_model,
-            contents=query,
-            config=types.EmbedContentConfig(task_type="RETRIEVAL_QUERY"),
-        )
-        return response.embeddings[0].values
+        """Generates an embedding for a query string."""
+        return self._get_embedding(query)
+
+    def _get_embedding(self, text: str) -> List[float]:
+        try:
+            response = self.client.embeddings.create(
+                model=self.embed_model,
+                input=text
+            )
+            return response.data[0].embedding
+        except APIConnectionError:
+            raise ConnectionError("Failed to connect to Ollama. Please ensure 'ollama serve' is running.")
