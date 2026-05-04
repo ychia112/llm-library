@@ -1,5 +1,6 @@
 import typer
 import os
+import time
 from typing import Optional
 from pathlib import Path
 
@@ -10,22 +11,25 @@ from llmlib.storage.db import LibraryDB
 app = typer.Typer(help="Personal LLM Knowledge Base CLI")
 
 
-def _get_tagger():
-    """Returns an initialized GeminiTagger instance using the GEMINI_API_KEY environment variable."""
-    api_key = os.getenv("GEMINI_API_KEY")
-    if not api_key:
-        typer.echo("Error: GEMINI_API_KEY is required for this command.", err=True)
-        raise typer.Exit(code=1)
-    try:
+def _get_tagger(provider: str, model_override: Optional[str]):
+    """Returns an initialized tagger instance based on provider."""
+    if provider.lower() == "gemini":
+        api_key = os.getenv("GEMINI_API_KEY")
+        if not api_key:
+            typer.echo("Error: GEMINI_API_KEY is required for Gemini provider.", err=True)
+            raise typer.Exit(code=1)
         from llmlib.llm.gemini import GeminiTagger
-    except ImportError:
-        typer.echo(
-            "Error: Gemini SDK is not installed. Install the dependencies from pyproject.toml.",
-            err=True,
-        )
+        model = model_override or "gemini-2.0-flash-lite"
+        return GeminiTagger(api_key=api_key, model=model)
+    
+    elif provider.lower() == "ollama":
+        from llmlib.llm.ollama import OllamaTagger
+        model = model_override or "gemma4:26b"
+        return OllamaTagger(model=model)
+    
+    else:
+        typer.echo(f"Error: Unknown provider '{provider}'.", err=True)
         raise typer.Exit(code=1)
-
-    return GeminiTagger(api_key=api_key)
 
 
 def _get_parser(platform: str):
@@ -45,6 +49,8 @@ def _get_parser(platform: str):
 def ingest(
     platform: str = typer.Argument(..., help="Platform: 'chatgpt' or 'claude'"),
     file_path: Path = typer.Argument(..., help="Path to export file"),
+    provider: str = typer.Option("gemini", "--provider", help="AI provider: gemini | ollama"),
+    model: Optional[str] = typer.Option(None, "--model", help="Override default model"),
 ):
     """
     Ingest LLM export files into the library.
@@ -54,8 +60,12 @@ def ingest(
         raise typer.Exit(code=1)
 
     parser = _get_parser(platform)
-    tagger = _get_tagger()
+    tagger = _get_tagger(provider, model)
     db = LibraryDB()
+
+    # Get effective model name from tagger
+    current_model = getattr(tagger, "tagger_model", getattr(tagger, "model", "unknown"))
+    typer.echo(f"[llmlib] provider={provider.lower()} model={current_model}")
 
     try:
         sessions = parser.parse(file_path)
@@ -63,22 +73,31 @@ def ingest(
             typer.echo("No sessions found in export file.")
             return
 
+        total_sessions = len(sessions)
         ingested_count = 0
-        for session in sessions:
+        
+        for i, session in enumerate(sessions):
+            # Ingest logic
             metadata = tagger.tag_session(session)
             session.topic = metadata.get("topic")
             raw_tags = metadata.get("tags", [])
             session.tags = [tag for tag in raw_tags if isinstance(tag, str)]
-            question_type = metadata.get("question_type")
-            session.question_type = question_type if isinstance(question_type, str) else None
-            summary = metadata.get("summary")
-            session.summary = summary if isinstance(summary, str) else None
+            session.question_type = metadata.get("question_type")
+            session.summary = metadata.get("summary")
 
             embedding = tagger.embed_session(session)
             db.upsert_session(session, embedding)
             ingested_count += 1
 
-        typer.echo(f"Ingested {ingested_count} sessions from {platform}.")
+            # Progress reporting
+            if ingested_count % 10 == 0:
+                typer.echo(f"[llmlib] {ingested_count}/{total_sessions} sessions ingested...")
+
+            # Rate limiting for Gemini
+            if provider.lower() == "gemini":
+                time.sleep(2)
+
+        typer.echo(f"[llmlib] Done. Ingested {ingested_count} sessions.")
     finally:
         db.close()
 
@@ -89,7 +108,14 @@ def ask(
     """
     Search your library for an answer.
     """
-    tagger = _get_tagger()
+    # Default to gemini for searching for now, or could be extended
+    api_key = os.getenv("GEMINI_API_KEY")
+    if not api_key:
+        typer.echo("Error: GEMINI_API_KEY is required for searching.", err=True)
+        raise typer.Exit(code=1)
+    
+    from llmlib.llm.gemini import GeminiTagger
+    tagger = GeminiTagger(api_key=api_key)
     db = LibraryDB()
 
     try:
