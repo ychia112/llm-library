@@ -16,11 +16,12 @@ class GeminiTagger:
     def _build_context(self, session: Session) -> str:
         """Constructs a condensed context from session messages."""
         lines = []
-        for msg in session.messages[:8]:
+        for msg in session.messages[:10]:
             prefix = "U" if msg.role in ["user", "human"] else "A"
-            limit = 200 if prefix == "U" else 80
-            content = msg.content[:limit].replace("\n", " ")
-            lines.append(f"{prefix}: {content}")
+            limit = 300 if prefix == "U" else 220
+            content = msg.content[:limit].replace("\n", " ").strip()
+            if content:
+                lines.append(f"{prefix}: {content}")
         return "\n".join(lines)
 
     def tag_session(self, session: Session) -> Dict[str, Any]:
@@ -54,9 +55,22 @@ Constraint: question_type MUST be exactly one of [debug, design, research, howto
                 contents=prompt,
                 config=types.GenerateContentConfig(
                     response_mime_type="application/json",
+                    temperature=0
                 ),
             )
-            return json.loads(response.text)
+            data = json.loads(response.text)
+            
+            valid_types = {"debug", "design", "research", "howto"}
+            qtype = data.get("question_type", "research")
+            if qtype not in valid_types:
+                qtype = "research"
+                
+            return {
+                "topic": data.get("topic") or "Unknown",
+                "tags": [t for t in data.get("tags", []) if isinstance(t, str)],
+                "question_type": qtype,
+                "summary": data.get("summary") or "No summary",
+            }
         except (json.JSONDecodeError, Exception):
             return {
                 "topic": "Unknown",

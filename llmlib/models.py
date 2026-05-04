@@ -1,7 +1,9 @@
 from datetime import datetime
-from typing import List, Optional
-from pydantic import BaseModel, Field
+from typing import List, Optional, Literal
+from pydantic import BaseModel, Field, field_validator
 import uuid
+
+QuestionType = Literal["debug", "design", "research", "howto"]
 
 class Message(BaseModel):
     """Represents a single message within an LLM session."""
@@ -22,6 +24,13 @@ class Session(BaseModel):
     # AI Generated Metadata
     topic: Optional[str] = None
     tags: List[str] = Field(default_factory=list)
-    question_type: Optional[str] = None # "debug" | "design" | "research" | "howto"
+    question_type: Optional[QuestionType] = None
     summary: Optional[str] = None
     embedding_id: Optional[int] = None # Reference to sqlite-vec row
+
+    @field_validator("tags", mode="before")
+    @classmethod
+    def normalize_tags(cls, value):
+        if not value:
+            return []
+        return [str(v).strip() for v in value if str(v).strip()]

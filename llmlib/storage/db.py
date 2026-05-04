@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 import sqlite_vec
+from sqlite_vec import serialize_float32
 
 from llmlib.models import Message, Session
 
@@ -12,7 +13,6 @@ from llmlib.models import Message, Session
 class LibraryDB:
     """Manages the local SQLite database with vector search capabilities via sqlite-vec."""
     DEFAULT_DB_PATH = Path("~/.llmlib/library.db").expanduser()
-    DEFAULT_EMBEDDING_DIM = 1536
 
     def __init__(self, db_path: Optional[Path] = None):
         """Initializes the database connection and ensures tables exist."""
@@ -23,7 +23,16 @@ class LibraryDB:
         self.conn.row_factory = sqlite3.Row
         self.conn.enable_load_extension(True)
         sqlite_vec.load(self.conn)
+        self.conn.enable_load_extension(False)
         self.init_db()
+
+    def __enter__(self):
+        """Context manager enter."""
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        """Context manager exit."""
+        self.close()
 
     def init_db(self) -> None:
         """Initializes the database schema."""
@@ -75,13 +84,8 @@ class LibraryDB:
             )
 
             dim = self._get_embedding_dim()
-            if dim is None:
-                dim = self.DEFAULT_EMBEDDING_DIM
-                self.conn.execute(
-                    "INSERT INTO library_meta(key, value) VALUES('embedding_dim', ?)",
-                    (str(dim),),
-                )
-            self._create_vector_table_if_missing(dim)
+            if dim is not None:
+                self._create_vector_table_if_missing(dim)
 
     def upsert_session(self, session: Session, embedding: list[float]) -> None:
         """Inserts or updates a session and its corresponding vector embedding."""
@@ -296,8 +300,10 @@ class LibraryDB:
             return None
         return int(row["embedding_id"])
 
-    def _serialize_embedding(self, embedding: list[float]) -> str:
-        return json.dumps([float(v) for v in embedding], ensure_ascii=False)
+    def _serialize_embedding(self, embedding: list[float]) -> bytes:
+        if not embedding:
+            raise ValueError("embedding must not be empty")
+        return serialize_float32([float(v) for v in embedding])
 
     def _row_to_session(self, row: sqlite3.Row) -> Session:
         tags = json.loads(row["tags"]) if row["tags"] else []
