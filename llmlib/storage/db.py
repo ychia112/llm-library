@@ -19,8 +19,6 @@ class LibraryDB:
         self.db_path = (db_path or self.DEFAULT_DB_PATH).expanduser()
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
 
-        # FastAPI dependencies can cross thread boundaries (worker -> event loop),
-        # so disable sqlite's same-thread guard for this local single-process DB usage.
         self.conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
         self.conn.enable_load_extension(True)
@@ -118,25 +116,55 @@ class LibraryDB:
             )
             session.embedding_id = target_embedding_id
 
-    def search_with_scores(self, query_embedding: list[float], top_k: int = 5) -> list[tuple[Session, float]]:
-        if not query_embedding: return []
-        table_exists = self.conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='session_vectors'").fetchone()
-        if not table_exists: return []
-        
-        # Ensure we have data
+    def search_with_scores(
+        self,
+        query_embedding: list[float],
+        top_k: int = 5,
+        keyword: str | None = None,
+    ) -> list[tuple[Session, float]]:
+        # Change 4: optional keyword pre-filtering to narrow candidate set
+        if not query_embedding:
+            return []
+        table_exists = self.conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='session_vectors'"
+        ).fetchone()
+        if not table_exists:
+            return []
         count = self.conn.execute("SELECT COUNT(*) FROM session_vectors").fetchone()[0]
-        if count == 0: return []
+        if count == 0:
+            return []
 
         self._ensure_embedding_dim(len(query_embedding))
-        rows = self.conn.execute(
-            """
-            SELECT s.*, v.distance FROM (
-                SELECT rowid, distance FROM session_vectors WHERE embedding MATCH ? AND k = ?
-            ) AS v JOIN sessions AS s ON s.embedding_id = v.rowid ORDER BY v.distance ASC
-            """,
-            (self._serialize_embedding(query_embedding), top_k),
-        ).fetchall()
-        return [(self._row_to_session(row), max(0.0, min(1.0, 1.0 - float(row["distance"])))) for row in rows]
+        fetch_k = top_k * 4 if keyword else top_k
+
+        base_sql = """
+            SELECT s.*, v.distance
+            FROM (
+                SELECT rowid, distance
+                FROM session_vectors
+                WHERE embedding MATCH ? AND k = ?
+            ) AS v
+            JOIN sessions AS s ON s.embedding_id = v.rowid
+        """
+
+        if keyword:
+            like_param = f"%{keyword}%"
+            base_sql += " WHERE (s.title LIKE ? OR s.tags LIKE ? OR s.summary LIKE ?)"
+            rows = self.conn.execute(
+                base_sql + " ORDER BY v.distance ASC",
+                (self._serialize_embedding(query_embedding), fetch_k,
+                 like_param, like_param, like_param),
+            ).fetchall()
+        else:
+            rows = self.conn.execute(
+                base_sql + " ORDER BY v.distance ASC",
+                (self._serialize_embedding(query_embedding), fetch_k),
+            ).fetchall()
+
+        return [
+            (self._row_to_session(row), max(0.0, min(1.0, 1.0 - float(row["distance"]))))
+            for row in rows[:top_k]
+        ]
 
     def search(self, query_embedding: list[float], top_k: int = 5) -> list[Session]:
         """Backwards-compatible search API: returns sessions only."""

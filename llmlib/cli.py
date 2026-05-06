@@ -134,8 +134,9 @@ def ask(
     provider: str = typer.Option("ollama", "--provider", help="Provider: gemini | ollama"),
     model: Optional[str] = typer.Option(None, "--model", help="Override embedding model"),
     chat_model: Optional[str] = typer.Option(None, "--chat-model", help="Override chat model for LLM fallback"),
-    threshold_hit: float = typer.Option(0.85, "--threshold-hit", help="Cosine similarity threshold for direct hit"),
-    threshold_partial: float = typer.Option(0.60, "--threshold-partial", help="Cosine similarity threshold for partial hit"),
+    # Change 3: lowered default thresholds for better local embedding model recall
+    threshold_hit: float = typer.Option(0.72, "--threshold-hit", help="Cosine similarity threshold for direct hit"),
+    threshold_partial: float = typer.Option(0.50, "--threshold-partial", help="Cosine similarity threshold for partial hit"),
     top_k: int = typer.Option(5, "--top-k", help="Number of sessions to retrieve"),
 ):
     """Search your library for an answer. History-First approach."""
@@ -143,7 +144,12 @@ def ask(
     
     with LibraryDB() as db:
         query_embedding = tagger.embed_query(query)
-        results = db.search_with_scores(query_embedding, top_k=top_k)
+
+        # Change 4: extract keyword hint from query for hybrid pre-filtering
+        query_words = query.strip().split()
+        keyword_hint = query_words[0] if len(query_words) > 1 else None
+
+        results = db.search_with_scores(query_embedding, top_k=top_k, keyword=keyword_hint)
         
         best_score = results[0][1] if results else 0.0
         
@@ -154,7 +160,7 @@ def ask(
             console.print(Panel(f"[bold]{session.title}[/bold]\n\n{session.summary or 'No summary available.'}", title="Summary"))
             
             console.print("\n[bold]Relevant Messages:[/bold]")
-            for msg in session.messages[:5]: # Show first 5 messages
+            for msg in session.messages[:5]:
                 role_color = "cyan" if msg.role in ["user", "human"] else "green"
                 console.print(Text.assemble((f"[{msg.role}] ", role_color), msg.content))
             
@@ -164,7 +170,6 @@ def ask(
             # PARTIAL
             console.print(f"[bold yellow]⚡ PARTIAL ({best_score:.2f})[/bold yellow] - context injected")
             
-            # Compose context from top-3 summaries
             context_parts = []
             for s, _ in results[:3]:
                 context_parts.append(f"Title: {s.title}\nSummary: {s.summary}")
@@ -240,6 +245,45 @@ def show(
             timestamp = message.timestamp.isoformat() if message.timestamp else "-"
             typer.echo(f"  {idx}. [{message.role}] ({timestamp})")
             typer.echo(f"     {message.content}")
+
+
+# Change 5: new reindex command to re-embed all sessions after embedding logic changes
+@app.command()
+def reindex(
+    provider: str = typer.Option("ollama", "--provider", help="AI provider: gemini | ollama"),
+    model: Optional[str] = typer.Option(None, "--model", help="Override default model"),
+):
+    """Re-embed all sessions in the library using the current embedding logic."""
+    tagger = _get_tagger(provider, model)
+    with LibraryDB() as db:
+        sessions = db.list_sessions(limit=10000)
+        if not sessions:
+            console.print("No sessions to reindex.")
+            return
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            TextColumn("{task.completed}/{task.total}"),
+            TimeElapsedColumn(),
+            console=console,
+        ) as progress:
+            task = progress.add_task("Reindexing...", total=len(sessions))
+            success, failed = 0, 0
+            for session in sessions:
+                try:
+                    embedding = tagger.embed_session(session)
+                    db.upsert_session(session, embedding)
+                    success += 1
+                except Exception as e:
+                    failed += 1
+                    console.print(f"[red]FAILED:[/red] {session.title[:50]} — {e}")
+                finally:
+                    progress.advance(task, 1)
+        console.print(
+            f"[bold green]Reindex complete.[/bold green] "
+            f"success=[green]{success}[/green] failed=[red]{failed}[/red]"
+        )
 
 
 @app.command()
