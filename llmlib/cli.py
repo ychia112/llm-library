@@ -13,6 +13,8 @@ from rich.progress import (
     TimeElapsedColumn,
     TimeRemainingColumn,
 )
+from rich.panel import Panel
+from rich.text import Text
 
 from llmlib.parsers.chatgpt import ChatGPTParser
 from llmlib.parsers.claude import ClaudeParser
@@ -34,7 +36,7 @@ def _get_tagger(provider: str, model_override: Optional[str]):
         return GeminiTagger(api_key=api_key, model=model)
     if provider == "ollama":
         from llmlib.llm.ollama import OllamaTagger
-        model = model_override or "gemma4:26b"
+        model = model_override or os.getenv("LLMLIB_OLLAMA_MODEL", "llama3.2:3b-instruct-q4_K_M")
         return OllamaTagger(model=model)
     typer.echo(f"Error: Unknown provider '{provider}'.", err=True)
     raise typer.Exit(code=1)
@@ -53,7 +55,7 @@ def _get_parser(platform: str):
 def ingest(
     platform: str = typer.Argument(..., help="Platform: 'chatgpt' or 'claude'"),
     file_path: Path = typer.Argument(..., help="Path to export file"),
-    provider: str = typer.Option("gemini", "--provider", help="AI provider: gemini | ollama"),
+    provider: str = typer.Option("ollama", "--provider", help="AI provider: gemini | ollama"),
     model: Optional[str] = typer.Option(None, "--model", help="Override default model"),
 ):
     """Ingest LLM export files into the library."""
@@ -114,7 +116,9 @@ def ingest(
                     progress.advance(task, 1)
 
                 if provider.lower() == "gemini":
-                    time.sleep(2)
+                    delay = float(os.getenv("LLMLIB_GEMINI_DELAY", "0"))
+                    if delay > 0:
+                        time.sleep(delay)
 
     console.print(
         f"[bold green][llmlib][/bold green] Done. "
@@ -126,25 +130,71 @@ def ingest(
 
 @app.command()
 def ask(
-    query: str = typer.Argument(..., help="Question to search in library"),
-    provider: str = typer.Option("gemini", "--provider", help="Embedding provider: gemini | ollama"),
-    model: Optional[str] = typer.Option(None, "--model", help="Override default model"),
+    query: str = typer.Argument(..., help="Your question"),
+    provider: str = typer.Option("ollama", "--provider", help="Provider: gemini | ollama"),
+    model: Optional[str] = typer.Option(None, "--model", help="Override embedding model"),
+    chat_model: Optional[str] = typer.Option(None, "--chat-model", help="Override chat model for LLM fallback"),
+    threshold_hit: float = typer.Option(0.85, "--threshold-hit", help="Cosine similarity threshold for direct hit"),
+    threshold_partial: float = typer.Option(0.60, "--threshold-partial", help="Cosine similarity threshold for partial hit"),
+    top_k: int = typer.Option(5, "--top-k", help="Number of sessions to retrieve"),
 ):
-    """Search your library for an answer."""
+    """Search your library for an answer. History-First approach."""
     tagger = _get_tagger(provider, model)
+    
     with LibraryDB() as db:
         query_embedding = tagger.embed_query(query)
-        results = db.search(query_embedding, top_k=5)
-        if not results:
-            typer.echo("No matching sessions found.")
-            return
-        typer.echo(f"Top {len(results)} results:")
-        for index, session in enumerate(results, start=1):
-            tags = ", ".join(session.tags) if session.tags else "-"
-            summary = session.summary or "-"
-            typer.echo(f"{index}. {session.title}")
-            typer.echo(f"   summary: {summary}")
-            typer.echo(f"   tags: {tags}")
+        results = db.search_with_scores(query_embedding, top_k=top_k)
+        
+        best_score = results[0][1] if results else 0.0
+        
+        if best_score >= threshold_hit:
+            # HIT
+            session, score = results[0]
+            console.print(f"[bold green]✓ HIT ({score:.2f})[/bold green] - Found in library")
+            console.print(Panel(f"[bold]{session.title}[/bold]\n\n{session.summary or 'No summary available.'}", title="Summary"))
+            
+            console.print("\n[bold]Relevant Messages:[/bold]")
+            for msg in session.messages[:5]: # Show first 5 messages
+                role_color = "cyan" if msg.role in ["user", "human"] else "green"
+                console.print(Text.assemble((f"[{msg.role}] ", role_color), msg.content))
+            
+            console.print(f"\n[bold green]tokens used: 0[/bold green]")
+            
+        elif best_score >= threshold_partial:
+            # PARTIAL
+            console.print(f"[bold yellow]⚡ PARTIAL ({best_score:.2f})[/bold yellow] - context injected")
+            
+            # Compose context from top-3 summaries
+            context_parts = []
+            for s, _ in results[:3]:
+                context_parts.append(f"Title: {s.title}\nSummary: {s.summary}")
+            context_text = "\n\n".join(context_parts)
+            
+            system_prompt = f"You are a helpful assistant. Use the following context from the user's past conversations to answer the question:\n\n{context_text}"
+            
+            if provider.lower() == "ollama":
+                from llmlib.llm.ollama import OllamaTagger
+                if isinstance(tagger, OllamaTagger):
+                    answer = tagger.chat(system_prompt, query, model=chat_model)
+                    console.print(Panel(answer, title="Assistant (Gemma)"))
+                else:
+                    console.print("[red]Error: Partial hit requires Ollama for chat fallback currently.[/red]")
+            else:
+                 console.print("[red]Error: Partial hit requires Ollama for chat fallback currently.[/red]")
+                 
+        else:
+            # MISS
+            console.print(f"[bold red]✗ MISS ({best_score:.2f})[/bold red] - LLM was queried")
+            
+            if provider.lower() == "ollama":
+                from llmlib.llm.ollama import OllamaTagger
+                if isinstance(tagger, OllamaTagger):
+                    answer = tagger.chat("You are a helpful assistant.", query, model=chat_model)
+                    console.print(Panel(answer, title="Assistant (Gemma)"))
+                else:
+                    console.print("[red]Error: Miss requires Ollama for chat fallback currently.[/red]")
+            else:
+                console.print("[red]Error: Miss requires Ollama for chat fallback currently.[/red]")
 
 
 @app.command()
@@ -190,6 +240,24 @@ def show(
             timestamp = message.timestamp.isoformat() if message.timestamp else "-"
             typer.echo(f"  {idx}. [{message.role}] ({timestamp})")
             typer.echo(f"     {message.content}")
+
+
+@app.command()
+def serve(
+    port: int = typer.Option(8765, "--port", help="Port to run the API server"),
+    host: str = typer.Option("0.0.0.0", "--host", help="Host to bind"),
+):
+    """Start the REST API server for Mac App integration."""
+    try:
+        import uvicorn
+        from llmlib.api.server import app as api_app
+    except ImportError:
+        typer.echo("Error: API dependencies not installed. Run: pip install 'llmlib[api]'", err=True)
+        raise typer.Exit(code=1)
+
+    typer.echo(f"[llmlib] API server running at http://{host}:{port}")
+    typer.echo("[llmlib] Press Ctrl+C to stop")
+    uvicorn.run(api_app, host=host, port=port, log_level="error")
 
 
 if __name__ == "__main__":
