@@ -19,7 +19,9 @@ class LibraryDB:
         self.db_path = (db_path or self.DEFAULT_DB_PATH).expanduser()
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
 
-        self.conn = sqlite3.connect(str(self.db_path))
+        # FastAPI dependencies can cross thread boundaries (worker -> event loop),
+        # so disable sqlite's same-thread guard for this local single-process DB usage.
+        self.conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
         self.conn.enable_load_extension(True)
         sqlite_vec.load(self.conn)
@@ -27,11 +29,9 @@ class LibraryDB:
         self.init_db()
 
     def __enter__(self):
-        """Context manager enter."""
         return self
 
     def __exit__(self, exc_type, exc, tb):
-        """Context manager exit."""
         self.close()
 
     def init_db(self) -> None:
@@ -48,6 +48,7 @@ class LibraryDB:
                     updated_at TEXT NOT NULL,
                     topic TEXT,
                     tags TEXT NOT NULL,
+                    key_entities TEXT NOT NULL DEFAULT '[]',
                     question_type TEXT,
                     summary TEXT,
                     embedding_id INTEGER,
@@ -63,36 +64,19 @@ class LibraryDB:
                 )
                 """
             )
-            self.conn.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_sessions_platform
-                ON sessions(platform)
-                """
-            )
-            self.conn.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_sessions_question_type
-                ON sessions(question_type)
-                """
-            )
-            self.conn.execute(
-                """
-                CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_embedding_id
-                ON sessions(embedding_id)
-                WHERE embedding_id IS NOT NULL
-                """
-            )
+            
+            # Migration check
+            cursor = self.conn.execute("PRAGMA table_info(sessions)")
+            columns = [row["name"] for row in cursor.fetchall()]
+            if "key_entities" not in columns:
+                self.conn.execute("ALTER TABLE sessions ADD COLUMN key_entities TEXT NOT NULL DEFAULT '[]'")
 
             dim = self._get_embedding_dim()
             if dim is not None:
                 self._create_vector_table_if_missing(dim)
 
     def upsert_session(self, session: Session, embedding: list[float]) -> None:
-        """Inserts or updates a session and its corresponding vector embedding."""
         embedding_dim = len(embedding)
-        if embedding_dim == 0:
-            raise ValueError("embedding must not be empty")
-
         self._ensure_embedding_dim(embedding_dim)
         embedding_payload = self._serialize_embedding(embedding)
 
@@ -107,224 +91,167 @@ class LibraryDB:
                 )
                 target_embedding_id = cursor.lastrowid
             else:
-                self.conn.execute(
-                    "DELETE FROM session_vectors WHERE rowid = ?",
-                    (target_embedding_id,),
-                )
-                self.conn.execute(
-                    "INSERT INTO session_vectors(rowid, embedding) VALUES (?, ?)",
-                    (target_embedding_id, embedding_payload),
-                )
+                self.conn.execute("DELETE FROM session_vectors WHERE rowid = ?", (target_embedding_id,))
+                self.conn.execute("INSERT INTO session_vectors(rowid, embedding) VALUES (?, ?)", (target_embedding_id, embedding_payload))
 
             self.conn.execute(
                 """
                 INSERT INTO sessions(
                     id, source_id, platform, title, created_at, updated_at,
-                    topic, tags, question_type, summary, embedding_id, messages
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    topic, tags, key_entities, question_type, summary, embedding_id, messages
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
-                    source_id=excluded.source_id,
-                    platform=excluded.platform,
-                    title=excluded.title,
-                    created_at=excluded.created_at,
-                    updated_at=excluded.updated_at,
-                    topic=excluded.topic,
-                    tags=excluded.tags,
-                    question_type=excluded.question_type,
-                    summary=excluded.summary,
-                    embedding_id=excluded.embedding_id,
-                    messages=excluded.messages
+                    source_id=excluded.source_id, platform=excluded.platform, title=excluded.title,
+                    created_at=excluded.created_at, updated_at=excluded.updated_at,
+                    topic=excluded.topic, tags=excluded.tags, key_entities=excluded.key_entities,
+                    question_type=excluded.question_type, summary=excluded.summary,
+                    embedding_id=excluded.embedding_id, messages=excluded.messages
                 """,
                 (
-                    session.id,
-                    session.source_id,
-                    session.platform,
-                    session.title,
-                    session.created_at.isoformat(),
-                    session.updated_at.isoformat(),
-                    session.topic,
-                    json.dumps(session.tags, ensure_ascii=False),
-                    session.question_type,
-                    session.summary,
-                    target_embedding_id,
+                    session.id, session.source_id, session.platform, session.title,
+                    session.created_at.isoformat(), session.updated_at.isoformat(),
+                    session.topic, json.dumps(session.tags, ensure_ascii=False),
+                    json.dumps(session.key_entities, ensure_ascii=False),
+                    session.question_type, session.summary, target_embedding_id,
                     json.dumps([msg.model_dump(mode="json") for msg in session.messages], ensure_ascii=False),
                 ),
             )
-
             session.embedding_id = target_embedding_id
 
-    def search(self, query_embedding: list[float], top_k: int = 5) -> list[Session]:
-        """Searches for sessions similar to the provided query embedding."""
-        if top_k <= 0:
-            return []
-        if not query_embedding:
-            raise ValueError("query_embedding must not be empty")
+    def search_with_scores(self, query_embedding: list[float], top_k: int = 5) -> list[tuple[Session, float]]:
+        if not query_embedding: return []
+        table_exists = self.conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='session_vectors'").fetchone()
+        if not table_exists: return []
+        
+        # Ensure we have data
+        count = self.conn.execute("SELECT COUNT(*) FROM session_vectors").fetchone()[0]
+        if count == 0: return []
 
         self._ensure_embedding_dim(len(query_embedding))
-
         rows = self.conn.execute(
             """
-            SELECT s.*
-            FROM (
-                SELECT rowid, distance
-                FROM session_vectors
-                WHERE embedding MATCH ? AND k = ?
-            ) AS v
-            JOIN sessions AS s ON s.embedding_id = v.rowid
-            ORDER BY v.distance ASC
+            SELECT s.*, v.distance FROM (
+                SELECT rowid, distance FROM session_vectors WHERE embedding MATCH ? AND k = ?
+            ) AS v JOIN sessions AS s ON s.embedding_id = v.rowid ORDER BY v.distance ASC
             """,
             (self._serialize_embedding(query_embedding), top_k),
         ).fetchall()
-        return [self._row_to_session(row) for row in rows]
+        return [(self._row_to_session(row), max(0.0, min(1.0, 1.0 - float(row["distance"])))) for row in rows]
+
+    def search(self, query_embedding: list[float], top_k: int = 5) -> list[Session]:
+        """Backwards-compatible search API: returns sessions only."""
+        return [session for session, _ in self.search_with_scores(query_embedding, top_k=top_k)]
 
     def get_session(self, session_id: str) -> Session | None:
-        """Retrieves a single session by its unique ID."""
-        row = self.conn.execute(
-            "SELECT * FROM sessions WHERE id = ?",
-            (session_id,),
-        ).fetchone()
-        if row is None:
-            return None
-        return self._row_to_session(row)
-
-    def list_sessions(
-        self,
-        tag: Optional[str] = None,
-        platform: Optional[str] = None,
-        question_type: Optional[str] = None,
-    ) -> list[Session]:
-        """Lists sessions with optional filtering by tag, platform, or question type."""
-        clauses = ["1=1"]
-        params: list[Any] = []
-
-        if platform:
-            clauses.append("platform = ?")
-            params.append(platform)
-        if question_type:
-            clauses.append("question_type = ?")
-            params.append(question_type)
-        if tag:
-            clauses.append("EXISTS (SELECT 1 FROM json_each(sessions.tags) WHERE json_each.value = ?)")
-            params.append(tag)
-
-        query = f"""
-            SELECT *
-            FROM sessions
-            WHERE {' AND '.join(clauses)}
-            ORDER BY updated_at DESC
-        """
-        rows = self.conn.execute(query, tuple(params)).fetchall()
-        return [self._row_to_session(row) for row in rows]
+        row = self.conn.execute("SELECT * FROM sessions WHERE id = ?", (session_id,)).fetchone()
+        return self._row_to_session(row) if row else None
 
     def delete_session(self, session_id: str) -> None:
-        """Deletes a session and its corresponding vector embedding from the database."""
-        row = self.conn.execute(
-            "SELECT embedding_id FROM sessions WHERE id = ?",
-            (session_id,),
-        ).fetchone()
-
+        row = self.conn.execute("SELECT embedding_id FROM sessions WHERE id = ?", (session_id,)).fetchone()
         with self.conn:
             self.conn.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
             if row is not None and row["embedding_id"] is not None:
-                self.conn.execute(
-                    "DELETE FROM session_vectors WHERE rowid = ?",
-                    (row["embedding_id"],),
-                )
+                self.conn.execute("DELETE FROM session_vectors WHERE rowid = ?", (row["embedding_id"],))
+
+    def list_sessions(
+        self,
+        tag=None,
+        platform=None,
+        question_type=None,
+        topic=None,
+        limit=50,
+        offset=0,
+        return_total: bool = False,
+    ):
+        clauses = ["1=1"]
+        params = []
+        if platform: clauses.append("platform = ?"); params.append(platform)
+        if question_type: clauses.append("question_type = ?"); params.append(question_type)
+        if topic: clauses.append("topic = ?"); params.append(topic)
+        if tag: clauses.append("EXISTS (SELECT 1 FROM json_each(sessions.tags) WHERE json_each.value = ?)"); params.append(tag)
+
+        where = " AND ".join(clauses)
+        total = self.conn.execute(f"SELECT COUNT(*) FROM sessions WHERE {where}", tuple(params)).fetchone()[0]
+        rows = self.conn.execute(f"SELECT * FROM sessions WHERE {where} ORDER BY updated_at DESC LIMIT ? OFFSET ?", tuple(params + [limit, offset])).fetchall()
+        sessions = [self._row_to_session(row) for row in rows]
+        if return_total:
+            return sessions, total
+        return sessions
+
+    def get_library_overview(self) -> dict[str, Any]:
+        total = self.conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0]
+        by_platform = [{"platform": r["platform"], "count": r["count"]} for r in self.conn.execute("SELECT platform, COUNT(*) as count FROM sessions GROUP BY platform")]
+        by_qtype = [{"question_type": r["question_type"], "count": r["count"]} for r in self.conn.execute("SELECT question_type, COUNT(*) as count FROM sessions GROUP BY question_type")]
+        
+        tag_counts = {}
+        for r in self.conn.execute("SELECT tags FROM sessions").fetchall():
+            for t in json.loads(r["tags"]): tag_counts[t] = tag_counts.get(t, 0) + 1
+        top_tags = sorted([{"tag": k, "count": v} for k, v in tag_counts.items()], key=lambda x: x["count"], reverse=True)[:10]
+        
+        by_topic = []
+        for r in self.conn.execute("SELECT topic, COUNT(*) as count FROM sessions WHERE topic IS NOT NULL GROUP BY topic").fetchall():
+            topic = r["topic"]
+            t_tags = {}
+            for tr in self.conn.execute("SELECT tags FROM sessions WHERE topic = ?", (topic,)).fetchall():
+                for t in json.loads(tr["tags"]): t_tags[t] = t_tags.get(t, 0) + 1
+            by_topic.append({"topic": topic, "count": r["count"], "top_tags": sorted(t_tags.keys(), key=lambda x: t_tags[x], reverse=True)[:3]})
+
+        recent = [self._row_to_session(row) for row in self.conn.execute("SELECT * FROM sessions ORDER BY updated_at DESC LIMIT 5").fetchall()]
+        return {"total_sessions": total, "by_topic": by_topic, "by_question_type": by_qtype, "by_platform": by_platform, "top_tags": top_tags, "recent_sessions": recent}
+
+    def get_topics(self) -> list[dict[str, Any]]:
+        return self.get_library_overview()["by_topic"]
+
+    def get_tags(self, topic=None) -> list[dict[str, Any]]:
+        query = "SELECT tags FROM sessions"
+        params = []
+        if topic: query += " WHERE topic = ?"; params.append(topic)
+        tag_counts = {}
+        for r in self.conn.execute(query, tuple(params)).fetchall():
+            for t in json.loads(r["tags"]): tag_counts[t] = tag_counts.get(t, 0) + 1
+        return sorted([{"tag": k, "count": v} for k, v in tag_counts.items()], key=lambda x: x["count"], reverse=True)
 
     def close(self) -> None:
-        """Closes the database connection."""
         self.conn.close()
 
-    def _create_vector_table_if_missing(self, dim: int) -> None:
-        table_exists = self.conn.execute(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='session_vectors'"
-        ).fetchone()
-        if table_exists is None:
-            self.conn.execute(
-                f"CREATE VIRTUAL TABLE session_vectors USING vec0(embedding float[{dim}])"
-            )
-
-    def _recreate_vector_table(self, dim: int) -> None:
-        self.conn.execute("DROP TABLE IF EXISTS session_vectors")
-        self.conn.execute(
-            f"CREATE VIRTUAL TABLE session_vectors USING vec0(embedding float[{dim}])"
-        )
-
     def _get_embedding_dim(self) -> Optional[int]:
-        row = self.conn.execute(
-            "SELECT value FROM library_meta WHERE key = 'embedding_dim'"
-        ).fetchone()
-        if row is None:
-            return None
-        return int(row["value"])
-
-    def _set_embedding_dim(self, dim: int) -> None:
-        self.conn.execute(
-            """
-            INSERT INTO library_meta(key, value)
-            VALUES('embedding_dim', ?)
-            ON CONFLICT(key) DO UPDATE SET value=excluded.value
-            """,
-            (str(dim),),
-        )
+        row = self.conn.execute("SELECT value FROM library_meta WHERE key = 'embedding_dim'").fetchone()
+        return int(row["value"]) if row else None
 
     def _ensure_embedding_dim(self, dim: int) -> None:
-        existing_dim = self._get_embedding_dim()
-        if existing_dim is None:
+        curr = self._get_embedding_dim()
+        if not curr:
             with self.conn:
-                self._set_embedding_dim(dim)
-                self._recreate_vector_table(dim)
-            return
+                self.conn.execute("INSERT INTO library_meta(key, value) VALUES('embedding_dim', ?)", (str(dim),))
+                self.conn.execute("DROP TABLE IF EXISTS session_vectors")
+                self.conn.execute(f"CREATE VIRTUAL TABLE session_vectors USING vec0(embedding float[{dim}])")
+        elif curr != dim:
+            if self.conn.execute("SELECT COUNT(*) FROM session_vectors").fetchone()[0] > 0:
+                raise ValueError(f"Dim mismatch: {curr} vs {dim}")
+            with self.conn:
+                self.conn.execute("UPDATE library_meta SET value = ? WHERE key = 'embedding_dim'", (str(dim),))
+                self.conn.execute("DROP TABLE IF EXISTS session_vectors")
+                self.conn.execute(f"CREATE VIRTUAL TABLE session_vectors USING vec0(embedding float[{dim}])")
 
-        if existing_dim == dim:
-            self._create_vector_table_if_missing(dim)
-            return
-
-        count_row = self.conn.execute("SELECT COUNT(*) AS c FROM session_vectors").fetchone()
-        count = int(count_row["c"]) if count_row is not None else 0
-        if count > 0:
-            raise ValueError(
-                f"embedding dimension mismatch: expected {existing_dim}, got {dim}"
-            )
-
-        with self.conn:
-            self._set_embedding_dim(dim)
-            self._recreate_vector_table(dim)
+    def _create_vector_table_if_missing(self, dim: int) -> None:
+        if not self.conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='session_vectors'").fetchone():
+            self.conn.execute(f"CREATE VIRTUAL TABLE session_vectors USING vec0(embedding float[{dim}])")
 
     def _get_existing_embedding_id(self, session_id: str) -> Optional[int]:
-        row = self.conn.execute(
-            "SELECT embedding_id FROM sessions WHERE id = ?",
-            (session_id,),
-        ).fetchone()
-        if row is None or row["embedding_id"] is None:
-            return None
-        return int(row["embedding_id"])
+        row = self.conn.execute("SELECT embedding_id FROM sessions WHERE id = ?", (session_id,)).fetchone()
+        return row["embedding_id"] if row else None
 
     def _serialize_embedding(self, embedding: list[float]) -> bytes:
-        if not embedding:
-            raise ValueError("embedding must not be empty")
         return serialize_float32([float(v) for v in embedding])
 
     def _row_to_session(self, row: sqlite3.Row) -> Session:
-        tags = json.loads(row["tags"]) if row["tags"] else []
-        raw_messages = json.loads(row["messages"]) if row["messages"] else []
-        messages = [Message.model_validate(msg) for msg in raw_messages]
-
         return Session(
-            id=row["id"],
-            source_id=row["source_id"],
-            platform=row["platform"],
-            title=row["title"],
-            created_at=datetime.fromisoformat(row["created_at"]),
-            updated_at=datetime.fromisoformat(row["updated_at"]),
-            messages=messages,
-            topic=row["topic"],
-            tags=tags,
-            question_type=row["question_type"],
-            summary=row["summary"],
-            embedding_id=row["embedding_id"],
+            id=row["id"], source_id=row["source_id"], platform=row["platform"], title=row["title"],
+            created_at=datetime.fromisoformat(row["created_at"]), updated_at=datetime.fromisoformat(row["updated_at"]),
+            messages=[Message.model_validate(m) for m in json.loads(row["messages"])],
+            topic=row["topic"], tags=json.loads(row["tags"]),
+            key_entities=json.loads(row["key_entities"]) if "key_entities" in row.keys() else [],
+            question_type=row["question_type"], summary=row["summary"], embedding_id=row["embedding_id"]
         )
 
-
-class Database(LibraryDB):
-    pass
+class Database(LibraryDB): pass

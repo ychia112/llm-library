@@ -24,13 +24,14 @@ class Session(BaseModel):
     # AI Generated Metadata
     topic: Optional[str] = None
     tags: List[str] = Field(default_factory=list)
+    key_entities: List[str] = Field(default_factory=list)
     question_type: Optional[QuestionType] = None
     summary: Optional[str] = None
     embedding_id: Optional[int] = None # Reference to sqlite-vec row
 
-    @field_validator("tags", mode="before")
+    @field_validator("tags", "key_entities", mode="before")
     @classmethod
-    def normalize_tags(cls, value):
+    def normalize_list(cls, value):
         if not value:
             return []
         return [str(v).strip() for v in value if str(v).strip()]
