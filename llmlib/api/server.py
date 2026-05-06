@@ -136,7 +136,12 @@ async def ask_question(request: AskRequest, db: LibraryDB = Depends(get_db)):
         tagger = GeminiTagger(api_key=os.getenv("GEMINI_API_KEY", ""))
 
     query_embedding = tagger.embed_query(request.query)
-    results_with_scores = db.search_with_scores(query_embedding, top_k=20)
+
+    # Change 4: pass keyword hint for hybrid pre-filtering
+    query_words = request.query.strip().split()
+    keyword_hint = query_words[0] if len(query_words) > 1 else None
+
+    results_with_scores = db.search_with_scores(query_embedding, top_k=20, keyword=keyword_hint)
     
     if request.platform and request.platform.lower() != "all":
         results_with_scores = [r for r in results_with_scores if r[0].platform.lower() == request.platform.lower()]
@@ -144,7 +149,7 @@ async def ask_question(request: AskRequest, db: LibraryDB = Depends(get_db)):
     results = results_with_scores[:5]
     best_score = results[0][1] if results else 0.0
     
-    if best_score >= 0.85:
+    if best_score >= 0.72:
         session, _ = results[0]
         return {
             "answer": f"Found a highly relevant conversation: {session.title}\n\nSummary: {session.summary}",
@@ -157,7 +162,7 @@ async def ask_question(request: AskRequest, db: LibraryDB = Depends(get_db)):
     hit_type = "miss"
     ref_sessions = []
     
-    if best_score >= 0.60:
+    if best_score >= 0.50:
         hit_type = "partial"
         context_parts = []
         for s, _ in results[:3]:

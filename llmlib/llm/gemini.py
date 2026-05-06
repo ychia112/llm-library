@@ -26,7 +26,6 @@ class GeminiTagger:
             if prefix == "U":
                 content = msg.content[:600].replace("\n", " ").strip()
             else:
-                # Preserve more content and structure for assistant messages
                 content = msg.content[:800].strip()
             if content:
                 lines.append(f"{prefix}: {content}")
@@ -38,38 +37,38 @@ class GeminiTagger:
         Output: Dictionary containing 'topic', 'tags', 'question_type', and 'summary'.
         """
         context = self._build_context(session)
-        prompt = f"""
-Analyze the following LLM chat session and extract detailed metadata for a searchable knowledge library.
-Output strict JSON only, no markdown fence.
+        # Change 1: instructions moved OUT of JSON schema into plain-text section
+        prompt = f"""Analyze this LLM chat session and extract structured metadata for a searchable knowledge library.
+Output STRICT JSON only — no markdown fences, no explanation.
 
 Title: {session.title}
 Context:
 {context}
 
-Expected JSON schema:
-{{
-    "topic": "Single noun or short phrase describing the main subject (e.g. Recommendation System, BPR Loss, FastAPI)",
-    "tags": [
-        "Extract 15-25 keywords covering ALL of the following categories:",
-        "1. Technical terms: algorithm, model, or architecture names (e.g. collaborative filtering, Alpha Gating, HybridRecommender)",
-        "2. Function / class / file names: every function, class, or filename mentioned (e.g. recommend.py, embed_session, _build_context)",
-        "3. Library / framework names: every library or framework mentioned (e.g. TensorFlow, BeautifulSoup4, pandas)",
-        "4. Metrics and numeric results: all metric names AND their values (e.g. NDCG@10, HR@10, AUC, 0.1456, 0.2341)",
-        "5. Dataset / data file names: any data files referenced (e.g. userrealinteraction.csv, searchresultwithclicks.json)",
-        "6. Core concept keywords: the key terms from the user's actual questions (e.g. embedding, triplet loss, geo-aware ranking)",
-        "7. Language / tooling: programming language or CLI tools used (e.g. Python, bash, curl)"
-    ],
-    "question_type": "One of: debug | design | research | howto",
-    "summary": "3-5 sentences covering: (1) what was asked, (2) what was solved, (3) key techniques or methods used, (4) any specific numeric results if present",
-    "key_entities": ["List every concrete name that appears in the session: function names, class names, file names, dataset names, model names — one entry per item"]
-}}
+Tag extraction rules (apply before writing JSON):
+Extract 15–25 keywords covering ALL of the following categories:
+1. Technical terms: algorithm, model, or architecture names
+2. Function / class / file names actually mentioned in the session
+3. Library / framework names
+4. Metrics and numeric results (include both name and value, e.g. "NDCG@10", "0.1456")
+5. Dataset / data file names
+6. Core concept keywords from the user's questions
+7. Programming language or CLI tools used
 
-Important rules:
-- tags must be a flat array of plain strings — no nested descriptions, only real keywords
-- Aim for 15-25 tags; more is better as long as every tag genuinely appears in the session
-- summary must be written entirely in English
-- question_type MUST be exactly one of [debug, design, research, howto]
-"""
+Rules:
+- tags must be a flat array of plain strings only — no nested descriptions, no instruction text
+- Aim for 15–25 tags; include only terms that genuinely appear in the session
+- summary must be written entirely in English, 3–5 sentences
+- question_type MUST be exactly one of: debug | design | research | howto
+
+Output this JSON shape:
+{{
+    "topic": "<single noun or short phrase, e.g. FastAPI, Recommendation System>",
+    "tags": ["<keyword1>", "<keyword2>", "..."],
+    "question_type": "<debug|design|research|howto>",
+    "summary": "<3–5 sentence English summary covering: what was asked, what was solved, key techniques, any numeric results>",
+    "key_entities": ["<function name>", "<class name>", "<file name>", "<dataset name>", "..."]
+}}"""
 
         try:
             response = self.client.models.generate_content(
@@ -104,15 +103,24 @@ Important rules:
             }
 
     def embed_session(self, session: Session) -> List[float]:
-        """Generates an embedding for a session using its title and summary."""
-        tags_str = ", ".join(session.tags) if session.tags else ""
-        entities_str = ", ".join(session.key_entities) if session.key_entities else ""
+        """Generates an embedding for a session using title, summary, tags, entities, and user questions."""
+        # Change 2: include raw user questions for better semantic match at query time
+        tags_str = ", ".join(session.tags[:15]) if session.tags else ""
+        entities_str = ", ".join(session.key_entities[:10]) if session.key_entities else ""
+
+        user_questions = []
+        for msg in session.messages[:10]:
+            if msg.role in ["user", "human"]:
+                user_questions.append(msg.content[:300].replace("\n", " ").strip())
+            if len(user_questions) >= 3:
+                break
+        questions_str = " | ".join(user_questions)
 
         text_to_embed = f"""Title: {session.title}
-Topic: {session.topic or ''}
+Summary: {session.summary or ''}
 Tags: {tags_str}
 Key Entities: {entities_str}
-Summary: {session.summary or ''}"""
+User questions: {questions_str}"""
         
         response = self.client.models.embed_content(
             model=self.embedding_model,
