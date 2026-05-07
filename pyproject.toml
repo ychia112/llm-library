@@ -17,6 +17,7 @@ requires-python = ">=3.10"
 [project.optional-dependencies]
 api = ["fastapi>=0.115.0", "uvicorn[standard]>=0.30.0"]
 mcp = ["mcp>=1.0.0"]
+cluster = ["umap-learn>=0.5", "hdbscan>=0.8", "numpy>=1.24"]
 
 [project.scripts]
 llmlib = "llmlib.cli:app"

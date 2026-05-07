@@ -86,6 +86,11 @@ class AskResponse(BaseModel):
     referenced_sessions: List[SessionSummary] = []
     tokens_used: int = 0
 
+class RetopicizeRequest(BaseModel):
+    provider: str = "ollama"
+    target_topics: int = 15
+    dry_run: bool = False
+
 # --- DB Dependency ---
 def get_db():
     with LibraryDB() as db:
@@ -94,6 +99,11 @@ def get_db():
 # --- Ingest Status ---
 _ingest_state: dict = {
     "running": False, "total": 0, "processed": 0, "current_title": "", "error": None
+}
+
+# --- Retopicize Status ---
+_retopicize_state: dict = {
+    "running": False, "done": False, "clusters_found": 0, "total": 0, "error": None
 }
 
 _INGEST_WORKERS = int(os.getenv("LLMLIB_INGEST_WORKERS", "4"))
@@ -161,6 +171,33 @@ def run_ingest(file_path: str, platform: str, provider: str):
         print(f"Ingest failed: {e}")
     finally:
         _ingest_state["running"] = False
+
+# --- Retopicize Logic (Background) ---
+def _run_retopicize(provider: str, target_topics: int, dry_run: bool):
+    global _retopicize_state
+    _retopicize_state = {"running": True, "done": False, "clusters_found": 0, "total": 0, "error": None}
+
+    if provider.lower() == "ollama":
+        from llmlib.llm.ollama import OllamaTagger
+        tagger = OllamaTagger()
+    else:
+        from llmlib.llm.gemini import GeminiTagger
+        tagger = GeminiTagger(api_key=os.getenv("GEMINI_API_KEY", ""))
+
+    try:
+        from llmlib.cluster import retopicize
+        with LibraryDB() as db:
+            result = retopicize(db, tagger, target_topics=target_topics, dry_run=dry_run)
+        _retopicize_state["clusters_found"] = result["clusters_found"]
+        _retopicize_state["total"] = result["total"]
+    except ImportError:
+        _retopicize_state["error"] = "Cluster dependencies not installed. Run: pip install 'llmlib[cluster]'"
+    except Exception as e:
+        _retopicize_state["error"] = str(e)
+        print(f"Retopicize failed: {e}")
+    finally:
+        _retopicize_state["running"] = False
+        _retopicize_state["done"] = True
 
 # --- Endpoints ---
 
@@ -283,3 +320,13 @@ def get_topics(db: LibraryDB = Depends(get_db)):
 @app.get("/library/tags", response_model=List[TagStats])
 def get_tags(topic: Optional[str] = None, db: LibraryDB = Depends(get_db)):
     return db.get_tags(topic=topic)
+
+@app.post("/library/retopicize")
+async def retopicize_library(request: RetopicizeRequest, background_tasks: BackgroundTasks):
+    """Re-cluster all sessions using embeddings. Run after large imports."""
+    background_tasks.add_task(_run_retopicize, request.provider, request.target_topics, request.dry_run)
+    return {"message": "Retopicize started in background"}
+
+@app.get("/library/retopicize/status")
+def get_retopicize_status():
+    return _retopicize_state

@@ -295,6 +295,39 @@ def reindex(
 
 
 @app.command()
+def retopicize(
+    provider: str = typer.Option("ollama", "--provider", help="AI provider: gemini | ollama"),
+    target_topics: int = typer.Option(15, "--target-topics", help="Hint for desired number of top-level topics"),
+    dry_run: bool = typer.Option(False, "--dry-run/--no-dry-run", help="Print assignments without saving"),
+):
+    """Re-cluster all sessions using embeddings. Fixes fragmented topic taxonomy."""
+    try:
+        from llmlib.cluster import retopicize as _retopicize
+    except ImportError:
+        typer.echo("Error: Cluster dependencies not installed. Run: pip install 'llmlib[cluster]'", err=True)
+        raise typer.Exit(code=1)
+
+    tagger = _get_tagger(provider, None)
+    with LibraryDB() as db:
+        total = db.conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0]
+        if total == 0:
+            console.print("No sessions in library.")
+            return
+        console.print(f"Re-clustering {total} sessions (target: ~{target_topics} topics)...")
+        result = _retopicize(db, tagger, target_topics=target_topics, dry_run=dry_run)
+        console.print(
+            f"[bold green]✓[/bold green] Found {result['clusters_found']} clusters, "
+            f"{result['noise_count']} noise sessions"
+        )
+        if dry_run:
+            console.print("\n[dim]Dry run — assignments not saved (first 20):[/dim]")
+            for a in result["assignments"][:20]:
+                console.print(f"  {a['topic']} / {a['sub_topic']}  ←  {a['title'][:60]}")
+        else:
+            console.print(f"[bold green]✓[/bold green] Updated {result['total']} sessions in library")
+
+
+@app.command()
 def serve(
     port: int = typer.Option(8765, "--port", help="Port to run the API server"),
     host: str = typer.Option("0.0.0.0", "--host", help="Host to bind"),
