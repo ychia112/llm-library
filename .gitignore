@@ -49,3 +49,8 @@ htmlcov/
 # Build
 *.pyo
 *.pyd
+
+# Web frontend
+webapp/node_modules/
+webapp/.next/
+webapp/.env.local

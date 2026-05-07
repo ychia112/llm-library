@@ -31,6 +31,7 @@ class SessionSummary(BaseModel):
     platform: str
     title: str
     topic: Optional[str]
+    sub_topic: Optional[str] = None
     tags: List[str]
     key_entities: List[str] = []
     question_type: Optional[str]
