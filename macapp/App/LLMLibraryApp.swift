@@ -7,6 +7,5 @@ struct LLMLibraryApp: App {
             ContentView()
         }
         .windowStyle(.hiddenTitleBar)
-        .windowResizability(.contentSize)
     }
 }

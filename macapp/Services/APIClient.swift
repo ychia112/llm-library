@@ -108,9 +108,31 @@ class APIClient {
         let body = try? JSONSerialization.data(withJSONObject: ["file_path": filePath, "platform": platform, "provider": provider])
         return try await request(path: "/ingest", method: "POST", body: body)
     }
+    func fetchIngestStatus() async throws -> IngestStatus {
+        return try await request(path: "/ingest/status")
+    }
 }
 
 // --- Response Models ---
+
+struct IngestStatus: Codable {
+    let running: Bool
+    let total: Int
+    let processed: Int
+    let currentTitle: String
+    let error: String?
+
+    var progress: Double {
+        guard total > 0 else { return 0 }
+        return Double(processed) / Double(total)
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case running, total, processed, error
+        case currentTitle = "current_title"
+    }
+}
+
 struct AskResponse: Codable {
     let answer: String
     let hitType: String

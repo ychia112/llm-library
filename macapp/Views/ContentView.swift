@@ -1,56 +1,31 @@
 import SwiftUI
 
 struct ContentView: View {
-    @State private var viewModel = AppViewModel()
-    @State private var apiClient = APIClient.shared
-    
+    @State private var selectedSessionID: String? = nil
+
+    private var showingDetail: Bool { selectedSessionID != nil }
+
     var body: some View {
-        NavigationSplitView {
-            // 左側窄欄：導航入口
-            List(selection: $viewModel.selection) {
-                NavigationLink(value: NavigationItem.search) {
-                    Label("Chat", systemImage: "message")
+        VStack(spacing: 0) {
+            HStack(spacing: 0) {
+                NavigationStack {
+                    LibraryView(selectedSessionID: $selectedSessionID)
                 }
-                NavigationLink(value: NavigationItem.library) {
-                    Label("Library", systemImage: "books.vertical")
-                }
-            }
-            .listStyle(.sidebar)
-            .navigationSplitViewColumnWidth(min: 150, ideal: 180, max: 200)
-            
-            // 底部顯示連線狀態
-            .safeAreaInset(edge: .bottom) {
-                HStack {
-                    Circle()
-                        .fill(apiClient.isConnected ? .green : .red)
-                        .frame(width: 8, height: 8)
-                    Text(apiClient.isConnected ? "Online" : "Offline")
-                        .font(.caption2)
-                        .help(apiClient.isConnected ? "Connected to 127.0.0.1:8765" : "Connection failed. Hover for info.")
-                    Spacer()
-                }
-                .padding()
-                .onTapGesture {
-                    // 點擊可以嘗試重新整理
-                    Task { await viewModel.loadRecent() }
+
+                if showingDetail {
+                    Divider()
+                    SessionDetailView(sessionID: selectedSessionID)
+                        .frame(width: 400)
+                        .transition(.asymmetric(
+                            insertion: .move(edge: .trailing).combined(with: .opacity),
+                            removal: .move(edge: .trailing).combined(with: .opacity)
+                        ))
                 }
             }
-        } content: {
-            // 中間主要區域
-            Group {
-                switch viewModel.selection {
-                case .search:
-                    ChatView(selectedSessionID: $viewModel.selectedSessionID)
-                case .library:
-                    LibraryView(selectedSessionID: $viewModel.selectedSessionID)
-                case .none:
-                    Text("Select a tool")
-                }
-            }
-        } detail: {
-            // 右側詳細區域
-            SessionDetailView(sessionID: viewModel.selectedSessionID)
+
+            ChatBarView()
         }
-        .frame(minWidth: 1000, minHeight: 650)
+        .frame(minWidth: showingDetail ? 1060 : 680, minHeight: 640)
+        .animation(.spring(response: 0.35, dampingFraction: 0.85), value: showingDetail)
     }
 }

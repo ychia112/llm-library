@@ -7,7 +7,7 @@ from llmlib.models import Session
 class OllamaTagger:
     """Handles session metadata generation and embedding using Ollama's OpenAI-compatible API."""
     
-    def __init__(self, model="gemma4:26b", embed_model="nomic-embed-text",
+    def __init__(self, model="llama3.2:3b-instruct-q4_K_M", embed_model="nomic-embed-text",
                  base_url="http://localhost:11434/v1"):
         """Initializes the Ollama client using OpenAI SDK."""
         self.client = OpenAI(base_url=base_url, api_key="ollama", timeout=60.0)
