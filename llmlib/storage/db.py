@@ -45,6 +45,7 @@ class LibraryDB:
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
                     topic TEXT,
+                    sub_topic TEXT,
                     tags TEXT NOT NULL,
                     key_entities TEXT NOT NULL DEFAULT '[]',
                     question_type TEXT,
@@ -68,6 +69,8 @@ class LibraryDB:
             columns = [row["name"] for row in cursor.fetchall()]
             if "key_entities" not in columns:
                 self.conn.execute("ALTER TABLE sessions ADD COLUMN key_entities TEXT NOT NULL DEFAULT '[]'")
+            if "sub_topic" not in columns:
+                self.conn.execute("ALTER TABLE sessions ADD COLUMN sub_topic TEXT")
 
             dim = self._get_embedding_dim()
             if dim is not None:
@@ -96,19 +99,21 @@ class LibraryDB:
                 """
                 INSERT INTO sessions(
                     id, source_id, platform, title, created_at, updated_at,
-                    topic, tags, key_entities, question_type, summary, embedding_id, messages
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    topic, sub_topic, tags, key_entities, question_type, summary, embedding_id, messages
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                     source_id=excluded.source_id, platform=excluded.platform, title=excluded.title,
                     created_at=excluded.created_at, updated_at=excluded.updated_at,
-                    topic=excluded.topic, tags=excluded.tags, key_entities=excluded.key_entities,
+                    topic=excluded.topic, sub_topic=excluded.sub_topic,
+                    tags=excluded.tags, key_entities=excluded.key_entities,
                     question_type=excluded.question_type, summary=excluded.summary,
                     embedding_id=excluded.embedding_id, messages=excluded.messages
                 """,
                 (
                     session.id, session.source_id, session.platform, session.title,
                     session.created_at.isoformat(), session.updated_at.isoformat(),
-                    session.topic, json.dumps(session.tags, ensure_ascii=False),
+                    session.topic, session.sub_topic,
+                    json.dumps(session.tags, ensure_ascii=False),
                     json.dumps(session.key_entities, ensure_ascii=False),
                     session.question_type, session.summary, target_embedding_id,
                     json.dumps([msg.model_dump(mode="json") for msg in session.messages], ensure_ascii=False),
@@ -293,13 +298,36 @@ class LibraryDB:
     def _serialize_embedding(self, embedding: list[float]) -> bytes:
         return serialize_float32([float(v) for v in embedding])
 
+    def get_knowledge_tree(self) -> dict[str, dict[str, int]]:
+        """Return a 2-level tree: topic → sub_topic → session count."""
+        tree: dict[str, dict[str, int]] = {}
+        rows = self.conn.execute(
+            """
+            SELECT topic, COALESCE(sub_topic, 'General') AS sub, COUNT(*) AS cnt
+            FROM sessions
+            WHERE topic IS NOT NULL
+            GROUP BY topic, sub
+            ORDER BY topic, cnt DESC
+            """
+        ).fetchall()
+        for row in rows:
+            topic = row["topic"]
+            sub = row["sub"]
+            if topic not in tree:
+                tree[topic] = {}
+            tree[topic][sub] = row["cnt"]
+        return tree
+
     def _row_to_session(self, row: sqlite3.Row) -> Session:
+        keys = row.keys()
         return Session(
             id=row["id"], source_id=row["source_id"], platform=row["platform"], title=row["title"],
             created_at=datetime.fromisoformat(row["created_at"]), updated_at=datetime.fromisoformat(row["updated_at"]),
             messages=[Message.model_validate(m) for m in json.loads(row["messages"])],
-            topic=row["topic"], tags=json.loads(row["tags"]),
-            key_entities=json.loads(row["key_entities"]) if "key_entities" in row.keys() else [],
+            topic=row["topic"],
+            sub_topic=row["sub_topic"] if "sub_topic" in keys else None,
+            tags=json.loads(row["tags"]),
+            key_entities=json.loads(row["key_entities"]) if "key_entities" in keys else [],
             question_type=row["question_type"], summary=row["summary"], embedding_id=row["embedding_id"]
         )
 

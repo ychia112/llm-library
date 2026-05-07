@@ -304,5 +304,16 @@ def serve(
     uvicorn.run(api_app, host=host, port=port, log_level="error")
 
 
+@app.command()
+def mcp():
+    """Start the MCP stdio server for Claude Code / AI agent integration."""
+    try:
+        from llmlib.mcp.server import main as mcp_main
+    except ImportError:
+        typer.echo("Error: MCP dependencies not installed. Run: pip install 'llmlib[mcp]'", err=True)
+        raise typer.Exit(code=1)
+    mcp_main()
+
+
 if __name__ == "__main__":
     app()
