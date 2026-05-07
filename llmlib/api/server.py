@@ -11,7 +11,7 @@ from llmlib.storage.db import LibraryDB
 from llmlib.models import Session, Message, QuestionType
 from llmlib.parsers.chatgpt import ChatGPTParser
 from llmlib.parsers.claude import ClaudeParser
-from llmlib.llm.tree import assign_knowledge_tree
+from llmlib.llm.tree import assign_knowledge_tree, assign_knowledge_tree_batch
 
 app = FastAPI(title="llmlib Knowledge API")
 
@@ -96,7 +96,7 @@ _ingest_state: dict = {
     "running": False, "total": 0, "processed": 0, "current_title": "", "error": None
 }
 
-_INGEST_WORKERS = int(os.getenv("LLMLIB_INGEST_WORKERS", "3"))
+_INGEST_WORKERS = int(os.getenv("LLMLIB_INGEST_WORKERS", "4"))
 
 def _tag_and_embed(session, tagger):
     """Tag and embed a single session. Runs in a worker thread."""
@@ -130,15 +130,14 @@ def run_ingest(file_path: str, platform: str, provider: str):
         workers = 1 if provider.lower() == "gemini" else _INGEST_WORKERS
 
         with LibraryDB() as db:
+            # Phase 1: parallel tag + embed
+            tagged_results: list[tuple] = []
             with ThreadPoolExecutor(max_workers=workers) as pool:
                 futures = {pool.submit(_tag_and_embed, s, tagger): s for s in sessions}
                 for future in as_completed(futures):
                     try:
                         session, embedding = future.result()
-                        topic, sub_topic = assign_knowledge_tree(session, tagger, db)
-                        session.topic = topic
-                        session.sub_topic = sub_topic
-                        db.upsert_session(session, embedding)
+                        tagged_results.append((session, embedding))
                     except Exception as e:
                         print(f"Failed to tag session: {e}")
                     finally:
@@ -147,6 +146,16 @@ def run_ingest(file_path: str, platform: str, provider: str):
 
                     if provider.lower() == "gemini":
                         time.sleep(float(os.getenv("LLMLIB_GEMINI_DELAY", "0")))
+
+            # Phase 2: batch classify topics (one LLM call per 10 sessions)
+            tagged_sessions = [s for s, _ in tagged_results]
+            topic_assignments = assign_knowledge_tree_batch(tagged_sessions, tagger, db)
+
+            # Phase 3: upsert all
+            for (session, embedding), (topic, sub_topic) in zip(tagged_results, topic_assignments):
+                session.topic = topic
+                session.sub_topic = sub_topic
+                db.upsert_session(session, embedding)
     except Exception as e:
         _ingest_state["error"] = str(e)
         print(f"Ingest failed: {e}")

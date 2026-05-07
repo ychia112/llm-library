@@ -104,7 +104,25 @@ Machine Learning (8)
 
 When you `ingest_session`, the LLM automatically places the session into the existing tree — reusing existing topics/sub-topics when a good match exists, or creating new ones.
 
-## 6. Environment Variables
+## 6. Performance Tuning (Ollama)
+
+By default Ollama processes one request at a time. To enable parallel inference
+(recommended for batch ingest on machines with 16GB+ RAM):
+
+```bash
+# Allow 4 parallel model instances (llama3.2:3b uses ~2-3GB each)
+export OLLAMA_NUM_PARALLEL=4
+ollama serve   # restart required
+
+# Match worker count in llmlib
+export LLMLIB_INGEST_WORKERS=4
+llmlib serve
+```
+
+On Apple Silicon with 48GB RAM, `OLLAMA_NUM_PARALLEL=4` and `LLMLIB_INGEST_WORKERS=4`
+reduces ingest time for 500 sessions from ~30 min to ~3-5 min.
+
+## 7. Environment Variables
 
 | Variable | Default | Description |
 |---|---|---|
