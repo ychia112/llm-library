@@ -19,6 +19,7 @@ from rich.text import Text
 from llmlib.parsers.chatgpt import ChatGPTParser
 from llmlib.parsers.claude import ClaudeParser
 from llmlib.storage.db import LibraryDB
+from llmlib.llm.tree import assign_knowledge_tree
 
 app = typer.Typer(help="Personal LLM Knowledge Base CLI")
 console = Console()
@@ -99,6 +100,10 @@ def ingest(
                     qtype = metadata.get("question_type")
                     session.question_type = qtype if qtype in {"debug", "design", "research", "howto"} else "research"
                     session.summary = metadata.get("summary")
+
+                    topic, sub_topic = assign_knowledge_tree(session, tagger, db)
+                    session.topic = topic
+                    session.sub_topic = sub_topic
 
                     progress.update(task, description=f"[yellow]Embedding:[/yellow] {short_title}")
                     embedding = tagger.embed_session(session)
@@ -273,6 +278,9 @@ def reindex(
             for session in sessions:
                 try:
                     embedding = tagger.embed_session(session)
+                    topic, sub_topic = assign_knowledge_tree(session, tagger, db)
+                    session.topic = topic
+                    session.sub_topic = sub_topic
                     db.upsert_session(session, embedding)
                     success += 1
                 except Exception as e:

@@ -23,7 +23,8 @@ struct ContentView: View {
                 }
             }
 
-            ChatBarView()
+            // Replace missing ChatBarView with existing ChatView
+            ChatView(selectedSessionID: $selectedSessionID)
         }
         .frame(minWidth: showingDetail ? 1060 : 680, minHeight: 640)
         .animation(.spring(response: 0.35, dampingFraction: 0.85), value: showingDetail)
