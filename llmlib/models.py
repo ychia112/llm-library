@@ -23,6 +23,7 @@ class Session(BaseModel):
     
     # AI Generated Metadata
     topic: Optional[str] = None
+    sub_topic: Optional[str] = None
     tags: List[str] = Field(default_factory=list)
     key_entities: List[str] = Field(default_factory=list)
     question_type: Optional[QuestionType] = None
