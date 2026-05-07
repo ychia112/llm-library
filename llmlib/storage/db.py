@@ -219,10 +219,31 @@ class LibraryDB:
         by_topic = []
         for r in self.conn.execute("SELECT topic, COUNT(*) as count FROM sessions WHERE topic IS NOT NULL GROUP BY topic").fetchall():
             topic = r["topic"]
-            t_tags = {}
+            t_tags: dict[str, int] = {}
             for tr in self.conn.execute("SELECT tags FROM sessions WHERE topic = ?", (topic,)).fetchall():
                 for t in json.loads(tr["tags"]): t_tags[t] = t_tags.get(t, 0) + 1
-            by_topic.append({"topic": topic, "count": r["count"], "top_tags": sorted(t_tags.keys(), key=lambda x: t_tags[x], reverse=True)[:3]})
+
+            by_question_type = [
+                {"question_type": qr["question_type"], "count": qr["count"]}
+                for qr in self.conn.execute(
+                    "SELECT question_type, COUNT(*) as count FROM sessions WHERE topic = ? AND question_type IS NOT NULL GROUP BY question_type",
+                    (topic,),
+                ).fetchall()
+            ]
+
+            entity_counts: dict[str, int] = {}
+            for er in self.conn.execute("SELECT key_entities FROM sessions WHERE topic = ?", (topic,)).fetchall():
+                for e in json.loads(er["key_entities"] or "[]"):
+                    entity_counts[e] = entity_counts.get(e, 0) + 1
+            top_entities = sorted(entity_counts, key=lambda x: entity_counts[x], reverse=True)[:8]
+
+            by_topic.append({
+                "topic": topic,
+                "count": r["count"],
+                "top_tags": sorted(t_tags.keys(), key=lambda x: t_tags[x], reverse=True)[:3],
+                "by_question_type": by_question_type,
+                "top_entities": top_entities,
+            })
 
         recent = [self._row_to_session(row) for row in self.conn.execute("SELECT * FROM sessions ORDER BY updated_at DESC LIMIT 5").fetchall()]
         return {"total_sessions": total, "by_topic": by_topic, "by_question_type": by_qtype, "by_platform": by_platform, "top_tags": top_tags, "recent_sessions": recent}

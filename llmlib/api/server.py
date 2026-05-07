@@ -3,6 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List, Optional, Any
 from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import os
 import time
 
@@ -40,14 +41,16 @@ class PaginatedSessions(BaseModel):
     sessions: List[SessionSummary]
     total: int
 
+class QuestionTypeStats(BaseModel):
+    question_type: str
+    count: int
+
 class TopicStats(BaseModel):
     topic: str
     count: int
     top_tags: List[str]
-
-class QuestionTypeStats(BaseModel):
-    question_type: str
-    count: int
+    by_question_type: List[QuestionTypeStats] = []
+    top_entities: List[str] = []
 
 class PlatformStats(BaseModel):
     platform: str
@@ -87,10 +90,31 @@ def get_db():
     with LibraryDB() as db:
         yield db
 
+# --- Ingest Status ---
+_ingest_state: dict = {
+    "running": False, "total": 0, "processed": 0, "current_title": "", "error": None
+}
+
+_INGEST_WORKERS = int(os.getenv("LLMLIB_INGEST_WORKERS", "3"))
+
+def _tag_and_embed(session, tagger):
+    """Tag and embed a single session. Runs in a worker thread."""
+    metadata = tagger.tag_session(session)
+    session.topic = metadata.get("topic")
+    session.tags = metadata.get("tags", [])
+    session.question_type = metadata.get("question_type")
+    session.summary = metadata.get("summary")
+    session.key_entities = metadata.get("key_entities", [])
+    embedding = tagger.embed_session(session)
+    return session, embedding
+
 # --- Ingest Logic (Background) ---
 def run_ingest(file_path: str, platform: str, provider: str):
+    global _ingest_state
+    _ingest_state = {"running": True, "total": 0, "processed": 0, "current_title": "", "error": None}
+
     parser = ChatGPTParser() if platform.lower() == "chatgpt" else ClaudeParser()
-    
+
     if provider.lower() == "ollama":
         from llmlib.llm.ollama import OllamaTagger
         tagger = OllamaTagger()
@@ -100,22 +124,30 @@ def run_ingest(file_path: str, platform: str, provider: str):
 
     try:
         sessions = parser.parse(os.path.expanduser(file_path))
+        _ingest_state["total"] = len(sessions)
+
+        workers = 1 if provider.lower() == "gemini" else _INGEST_WORKERS
+
         with LibraryDB() as db:
-            for session in sessions:
-                metadata = tagger.tag_session(session)
-                session.topic = metadata.get("topic")
-                session.tags = metadata.get("tags", [])
-                session.question_type = metadata.get("question_type")
-                session.summary = metadata.get("summary")
-                session.key_entities = metadata.get("key_entities", [])
-                
-                embedding = tagger.embed_session(session)
-                db.upsert_session(session, embedding)
-                
-                if provider.lower() == "gemini":
-                    time.sleep(float(os.getenv("LLMLIB_GEMINI_DELAY", "0")))
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                futures = {pool.submit(_tag_and_embed, s, tagger): s for s in sessions}
+                for future in as_completed(futures):
+                    try:
+                        session, embedding = future.result()
+                        db.upsert_session(session, embedding)
+                    except Exception as e:
+                        print(f"Failed to tag session: {e}")
+                    finally:
+                        _ingest_state["processed"] += 1
+                        _ingest_state["current_title"] = futures[future].title
+
+                    if provider.lower() == "gemini":
+                        time.sleep(float(os.getenv("LLMLIB_GEMINI_DELAY", "0")))
     except Exception as e:
+        _ingest_state["error"] = str(e)
         print(f"Ingest failed: {e}")
+    finally:
+        _ingest_state["running"] = False
 
 # --- Endpoints ---
 
@@ -125,6 +157,10 @@ async def ingest_file(request: IngestRequest, background_tasks: BackgroundTasks)
         raise HTTPException(status_code=400, detail="File not found")
     background_tasks.add_task(run_ingest, request.file_path, request.platform, request.provider)
     return {"message": "Ingest started in background"}
+
+@app.get("/ingest/status")
+def get_ingest_status():
+    return _ingest_state
 
 @app.post("/ask", response_model=AskResponse)
 async def ask_question(request: AskRequest, db: LibraryDB = Depends(get_db)):
@@ -218,12 +254,18 @@ def get_session(id: str, db: LibraryDB = Depends(get_db)):
 @app.get("/library/overview", response_model=LibraryOverview)
 def get_overview(db: LibraryDB = Depends(get_db)):
     stats = db.get_library_overview()
-    stats["recent_sessions"] = [SessionSummary(**s.model_dump()) for s in stats["recent_sessions"]]
-    return stats
+    return LibraryOverview(
+        total_sessions=stats["total_sessions"],
+        by_topic=[TopicStats(**t) for t in stats["by_topic"]],
+        by_question_type=[QuestionTypeStats(**q) for q in stats["by_question_type"]],
+        by_platform=[PlatformStats(**p) for p in stats["by_platform"]],
+        top_tags=[TagStats(**t) for t in stats["top_tags"]],
+        recent_sessions=[SessionSummary(**s.model_dump()) for s in stats["recent_sessions"]],
+    )
 
 @app.get("/library/topics", response_model=List[TopicStats])
 def get_topics(db: LibraryDB = Depends(get_db)):
-    return db.get_topics()
+    return [TopicStats(**t) for t in db.get_topics()]
 
 @app.get("/library/tags", response_model=List[TagStats])
 def get_tags(topic: Optional[str] = None, db: LibraryDB = Depends(get_db)):
