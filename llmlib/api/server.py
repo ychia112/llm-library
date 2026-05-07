@@ -11,6 +11,7 @@ from llmlib.storage.db import LibraryDB
 from llmlib.models import Session, Message, QuestionType
 from llmlib.parsers.chatgpt import ChatGPTParser
 from llmlib.parsers.claude import ClaudeParser
+from llmlib.llm.tree import assign_knowledge_tree
 
 app = FastAPI(title="llmlib Knowledge API")
 
@@ -134,6 +135,9 @@ def run_ingest(file_path: str, platform: str, provider: str):
                 for future in as_completed(futures):
                     try:
                         session, embedding = future.result()
+                        topic, sub_topic = assign_knowledge_tree(session, tagger, db)
+                        session.topic = topic
+                        session.sub_topic = sub_topic
                         db.upsert_session(session, embedding)
                     except Exception as e:
                         print(f"Failed to tag session: {e}")
