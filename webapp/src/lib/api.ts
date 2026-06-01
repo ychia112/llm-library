@@ -81,7 +81,7 @@ export function fetchIngestStatus(): Promise<IngestStatus> {
   return api("/ingest/status")
 }
 
-export function startRetopicize(targetTopics = 15): Promise<void> {
+export function startRetopicize(targetTopics = 8): Promise<void> {
   return api("/library/retopicize", {
     method: "POST",
     body: JSON.stringify({ target_topics: targetTopics }),

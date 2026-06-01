@@ -151,7 +151,7 @@ def retopicize(
     )
     reduced = reducer.fit_transform(embeddings_matrix)
 
-    min_cluster_size = max(2, n // (target_topics * 2))
+    min_cluster_size = max(5, n // target_topics)
     clusterer = hdbscan_mod.HDBSCAN(
         min_cluster_size=min_cluster_size,
         min_samples=1,

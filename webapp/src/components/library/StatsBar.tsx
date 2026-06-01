@@ -42,29 +42,26 @@ export default function StatsBar({ overview }: { overview: LibraryOverview | nul
     pollStatus()
   }, [pollStatus])
 
-  // Poll while retopicize is running
+  // Poll while retopicize is running or starting
   useEffect(() => {
-    if (!retopStatus?.running) {
-      if (retopStatus?.done && retopStatus.clusters_found > 0) {
-        refreshTopics()
-      }
+    if (!retopStatus?.running && !isStarting) {
+      if (retopStatus?.done) refreshTopics()
       return
     }
     const id = setInterval(pollStatus, 2000)
     return () => clearInterval(id)
-  }, [retopStatus?.running, retopStatus?.done, pollStatus, refreshTopics])
+  }, [retopStatus?.running, retopStatus?.done, isStarting, pollStatus, refreshTopics])
 
   const handleRetopicize = async () => {
     if (isStarting) return
     setIsStarting(true)
     setError(null)
     try {
-      await startRetopicize()
-      await pollStatus()
+      await startRetopicize(8)
+      setIsStarting(false)
     } catch (e) {
       setError("Failed to start retopicize")
       console.error(e)
-    } finally {
       setIsStarting(false)
     }
   }

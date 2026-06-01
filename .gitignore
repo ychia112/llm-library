@@ -54,3 +54,8 @@ htmlcov/
 webapp/node_modules/
 webapp/.next/
 webapp/.env.local
+
+# Xcode user data
+*.xcuserstate
+LLMLibrary/LLMLibrary.xcodeproj/xcuserdata/
+LLMLibrary/LLMLibrary.xcodeproj/project.xcworkspace/xcuserdata/
