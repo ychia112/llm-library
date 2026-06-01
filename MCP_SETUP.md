@@ -1,12 +1,12 @@
-# llmlib MCP Server — Claude Code Setup
+# llmlib MCP Server Setup
 
-This guide connects your personal knowledge library to Claude Code so it can search your past conversations, retrieve sessions, and ingest new ones as MCP tools.
+This guide connects your personal knowledge library to any MCP-compatible AI client (Claude Code, Cursor, Continue, etc.) so it can search your past conversations, retrieve sessions, and ingest new ones as tools.
 
 ## Prerequisites
 
 - llmlib installed with your library already populated (`llmlib ingest ...`)
 - Ollama running locally with `llama3.2:3b-instruct-q4_K_M` (or set `LLMLIB_OLLAMA_MODEL`)
-- Claude Code installed
+- An MCP-compatible client (Claude Code, Cursor, etc.)
 
 ## 1. Install MCP dependencies
 
@@ -14,9 +14,15 @@ This guide connects your personal knowledge library to Claude Code so it can sea
 pip install 'llmlib[mcp]'
 ```
 
-## 2. Register the MCP server in Claude Code
+## 2. Register the MCP server
 
-Add to your Claude Code MCP config (`~/.claude/claude_code_config.json` or via `claude mcp add`):
+### Claude Code
+
+```bash
+claude mcp add llmlib -- llmlib mcp
+```
+
+Or add to `~/.claude/claude_code_config.json`:
 
 ```json
 {
@@ -31,12 +37,6 @@ Add to your Claude Code MCP config (`~/.claude/claude_code_config.json` or via `
     }
   }
 }
-```
-
-Or via CLI:
-
-```bash
-claude mcp add llmlib -- llmlib mcp
 ```
 
 To use Gemini instead of Ollama:
@@ -65,7 +65,7 @@ To use Gemini instead of Ollama:
 | `get_knowledge_tree()` | Show the 2-level topic → sub_topic tree |
 | `ingest_session(title, messages, platform)` | Save a new session into the library |
 
-## 4. Usage Examples in Claude Code
+## 4. Usage Examples
 
 ```
 # Search your library
@@ -102,15 +102,15 @@ Machine Learning (8)
   • Inference & Serving (3)
 ```
 
-When you `ingest_session`, the LLM automatically places the session into the existing tree — reusing existing topics/sub-topics when a good match exists, or creating new ones.
+When you `ingest_session`, the LLM automatically places the session into the existing tree — reusing existing topics / sub-topics when a good match exists, or creating new ones.
 
 ## 6. Performance Tuning (Ollama)
 
 By default Ollama processes one request at a time. To enable parallel inference
-(recommended for batch ingest on machines with 16GB+ RAM):
+(recommended on machines with 16 GB+ RAM):
 
 ```bash
-# Allow 4 parallel model instances (llama3.2:3b uses ~2-3GB each)
+# Allow 4 parallel model instances (llama3.2:3b uses ~2-3 GB each)
 export OLLAMA_NUM_PARALLEL=4
 ollama serve   # restart required
 
@@ -119,7 +119,7 @@ export LLMLIB_INGEST_WORKERS=4
 llmlib serve
 ```
 
-On Apple Silicon with 48GB RAM, `OLLAMA_NUM_PARALLEL=4` and `LLMLIB_INGEST_WORKERS=4`
+On Apple Silicon with 48 GB RAM, `OLLAMA_NUM_PARALLEL=4` and `LLMLIB_INGEST_WORKERS=4`
 reduces ingest time for 500 sessions from ~30 min to ~3-5 min.
 
 ## 7. Environment Variables
